@@ -33,8 +33,8 @@
 
     //Safari 9 doesn't have TextDecoder API
     function str2ab(str) {
-        let buf = new ArrayBuffer(str.length * 2); // 2 bytes for each char
-        let bufView = new Uint16Array(buf);
+        let buf = new ArrayBuffer(str.length); // 2 bytes for each char
+        let bufView = new Uint8Array(buf);
         let ii;
         let strLen = str.length;
         for (ii = 0; ii < strLen; ii += 1) {
