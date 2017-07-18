@@ -3,6 +3,19 @@
 //  BleBrowser
 //
 //  Created by Paul Theriault on 7/03/2016.
+//  Copyright © 2016-2017 Paul Theriault & David Park. All rights reserved.
+//
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
+//
+//  http://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
 //
 
 import Foundation
@@ -101,6 +114,16 @@ open class WBDevice: NSObject, Jsonifiable, CBPeripheralDelegate {
     var deviceId = UUID() // generated ID used instead of internal iOS name
     var peripheral: CBPeripheral
     var adData: BluetoothAdvertisingData
+    var name: String? {
+        get {
+            return self.peripheral.name
+        }
+    }
+    var internalUUID: UUID {
+        get {
+            return self.peripheral.identifier
+        }
+    }
 
     weak var manager: WBManager?
 
@@ -114,13 +137,16 @@ open class WBDevice: NSObject, Jsonifiable, CBPeripheralDelegate {
     var getCharacteristicTM = WBTransactionManager<CharacteristicTransactionKey>()
     var readCharacteristicTM = WBTransactionManager<CharacteristicTransactionKey>()
 
-    // MARK: - Constructor
+    // MARK: - Constructor and equality
     init(peripheral: CBPeripheral, advertisementData: [String: Any] = [:], RSSI: NSNumber = 0, manager: WBManager) {
         self.peripheral = peripheral
         self.adData = BluetoothAdvertisingData(advertisementData:advertisementData,RSSI: RSSI)
         self.manager = manager
         super.init()
         self.peripheral.delegate = self
+    }
+    static func ==(left: WBDevice, right: WBDevice) -> Bool {
+        return left.peripheral == right.peripheral
     }
 
     // MARK: - API
@@ -306,7 +332,7 @@ open class WBDevice: NSObject, Jsonifiable, CBPeripheralDelegate {
                 break
             }
 
-            NSLog("Writing value \(String(data: view.data, encoding: String.Encoding.utf8)) to peripheral")
+            NSLog("Writing value \(String(data: view.data, encoding: String.Encoding.utf8) ?? "<bad data>") to peripheral")
             self.peripheral.writeValue(view.data, for: char, type: CBCharacteristicWriteType.withoutResponse)
             transaction.resolveAsSuccess()
 
@@ -321,7 +347,7 @@ open class WBDevice: NSObject, Jsonifiable, CBPeripheralDelegate {
                 view.resolveUnknownCharacteristic()
                 break
             }
-            NSLog("Starting notifications for characteristic \(view.characteristicUUID.uuidString) on device \(self.peripheral.name)")
+            NSLog("Starting notifications for characteristic \(view.characteristicUUID.uuidString) on device \(self.peripheral.name ?? "<no-name>")")
 
             self.peripheral.setNotifyValue(true, for: char)
             transaction.resolveAsSuccess()
@@ -393,25 +419,22 @@ open class WBDevice: NSObject, Jsonifiable, CBPeripheralDelegate {
 
     open func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         if let err = error {
-            NSLog("Error \(err) adding notifications to device \(peripheral.name) for characteristic \(characteristic.uuid.uuidString)")
+            NSLog("Error \(err) adding notifications to device \(peripheral.name ?? "<no-name>") for characteristic \(characteristic.uuid.uuidString)")
         } else {
-            NSLog("Notifications enabled on device \(peripheral.name) for characteristic \(characteristic.uuid.uuidString)")
+            NSLog("Notifications enabled on device \(peripheral.name ?? "<no-name>") for characteristic \(characteristic.uuid.uuidString)")
         }
     }
 
     open func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
 
-        NSLog("Characteristic Updated: \(characteristic.uuid.uuidString) -> \(characteristic.value)")
-
         if self.readCharacteristicTM.transactions.count > 0 {
             // We have read transactions outstanding, which means that this is a response after a read request, so complete those transactions.
-            self.readCharacteristicTM.apply(
-                {
-                    if let err = error {
-                        $0.resolveAsFailure(withMessage: "Error reading characteristic: \(err.localizedDescription)")
-                        return
-                    }
-                    $0.resolveAsSuccess(withObject: characteristic.value!)
+            self.readCharacteristicTM.apply({
+                if let err = error {
+                    $0.resolveAsFailure(withMessage: "Error reading characteristic: \(err.localizedDescription)")
+                    return
+                }
+                $0.resolveAsSuccess(withObject: characteristic.value!)
             },
                 iff: {
                     let cview = CharacteristicView(transaction: $0)!
@@ -423,6 +446,7 @@ open class WBDevice: NSObject, Jsonifiable, CBPeripheralDelegate {
             if let wv = self.view {
                 wv.evaluateJavaScript(
                     "receiveCharacteristicValueNotification(" +
+                    "\(self.deviceId.uuidString.jsonify()), " +
                     "\(characteristic.uuid.uuidString.lowercased().jsonify()), " +
                     "\(characteristic.value!.jsonify())" +
                     ")")
@@ -489,7 +513,7 @@ class BluetoothAdvertisingData{
         let data = advertisementData[CBAdvertisementDataManufacturerDataKey]
         self.manufacturerData = ""
         if data != nil{
-            if let dataString = NSString(data: data as! Data, encoding: String.Encoding.utf8.rawValue) as? String {
+            if let dataString = NSString(data: data as! Data, encoding: String.Encoding.utf8.rawValue) as String? {
                 self.manufacturerData = dataString
             } else {
                 print("Error parsing advertisement data: not a valid UTF-8 sequence")

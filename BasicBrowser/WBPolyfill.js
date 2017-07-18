@@ -4,6 +4,19 @@
 /*global
         atob, Event, window
 */
+//  Copyright 2016-2017 Paul Theriault and David Park. All rights reserved.
+//
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
+//
+//  http://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
 // adapted from chrome app polyfill https://github.com/WebBluetoothCG/chrome-app-polyfill
 
 (function () {
@@ -31,16 +44,17 @@
         return window.btoa(binary);
     }
 
-    //Safari 9 doesn't have TextDecoder API
-    function str2ab(str) {
-        let buf = new ArrayBuffer(str.length); // 2 bytes for each char
-        let bufView = new Uint8Array(buf);
+
+    function str64todv(str64) {
+        // Return a DataView from a base64 encoded DOM String.
+        let str16 = atob(str64);
+        let ab = new Int8Array(str16.length);
         let ii;
-        let strLen = str.length;
-        for (ii = 0; ii < strLen; ii += 1) {
-            bufView[ii] = str.charCodeAt(ii);
+        for (ii = 0; ii < ab.length; ii += 1) {
+            // trusted interface, so don't check this is 0 <= charCode < 256
+            ab[ii] = str16.charCodeAt(ii);
         }
-        return buf;
+        return new DataView(ab.buffer);
     }
 
     //
@@ -170,6 +184,11 @@
                 .then(function () {
                     self.connected = true;
                     native.registerDeviceForNotifications(self.device);
+                    self.connectionTransactionIDs.splice(
+                        self.connectionTransactionIDs.indexOf(tid),
+                        1
+                    );
+
                     return self;
                 });
         },
@@ -300,7 +319,7 @@
             let char = this;
             return this.sendMessage("readCharacteristicValue")
                 .then(function (valueEncoded) {
-                    char.value = new DataView(str2ab(atob(valueEncoded)));
+                    char.value = str64todv(valueEncoded);
                     return char.value;
                 });
         },
@@ -606,7 +625,7 @@
             if (filters && filters.length > 0) {
                 throw new TypeError("acceptAllDevices was true but filters was not empty");
             }
-            return native.sendMessage("requestDevice", {data: {filters: []}})
+            return native.sendMessage("requestDevice", {data: {acceptAllDevices: true}})
                 .then(function (device) {
                     return new BluetoothDevice(device);
                 });
@@ -618,12 +637,14 @@
                 filter.services = [];
             }
             if (filter.services.length > 0 ||
-                    (filter.namePrefix !== undefined && filter.namePrefix.length > 0)) {
+                    (filter.namePrefix !== undefined && filter.namePrefix.length > 0) ||
+                    (filter.name !== undefined && filter.name.length > 0)) {
                 hasAtLeastOneFilter = true;
             }
             return {
                 services: filter.services.map(window.BluetoothUUID.getService),
-                namePrefix: filter.namePrefix
+                namePrefix: filter.namePrefix,
+                name: filter.name
             };
         });
         if (!hasAtLeastOneFilter) {
@@ -717,6 +738,7 @@
                 console.log("Response for unknown callbackID", callbackID);
             }
         },
+        // {deviceId: BluetoothDevice}
         devicesBeingNotified: {},
         registerDeviceForNotifications: function (device) {
             let did = device.id;
@@ -749,37 +771,50 @@
         receiveDeviceDisconnectEvent: function (deviceId) {
             console.log("<-- device disconnect event", deviceId);
             let devices = native.devicesBeingNotified[deviceId];
-            if (devices === undefined || devices.length === 0) {
+            if (devices !== undefined) {
                 console.log("Device not registered for notifications");
-                return;
+                devices.forEach(function (device) {
+                    device.handleSpontaneousDisconnectEvent();
+                });
             }
-            devices.forEach(function (device) {
-                device.handleSpontaneousDisconnectEvent();
-            });
+            native.characteristicsBeingNotified[deviceId] = undefined;
         },
+        // {deviceUUID: {characteristicUUID: [BluetoothRemoteGATTCharacteristic]}}
         characteristicsBeingNotified: {},
         registerCharacteristicForNotifications: function (characteristic) {
+
+            let did = characteristic.service.device.id;
             let cid = characteristic.uuid;
-            console.log("Registering char UUID", cid);
-            if (native.characteristicsBeingNotified[cid] === undefined) {
-                native.devicesBeingNotified[cid] = [];
+            console.log("Registering char UUID " + cid + " on device " + did);
+
+            if (native.characteristicsBeingNotified[did] === undefined) {
+                native.characteristicsBeingNotified[did] = {};
             }
-            native.devicesBeingNotified[cid].push(characteristic);
+            let chars = native.characteristicsBeingNotified[did];
+            if (chars[cid] === undefined) {
+                chars[cid] = [];
+            }
+            chars[cid].push(characteristic);
         },
-        receiveCharacteristicValueNotification: function (characteristicId, d64) {
-            let chars = native.devicesBeingNotified[characteristicId];
-            console.log("<-- char val notification", characteristicId, d64);
-            if (!chars) {
+        receiveCharacteristicValueNotification: function (
+            deviceId,
+            characteristicId,
+            d64
+        ) {
+            let devChars = native.characteristicsBeingNotified[deviceId];
+            let chars = devChars !== undefined
+                ? devChars[characteristicId]
+                : undefined;
+            if (chars === undefined) {
                 console.log(
-                    "Characteristic notification ignored for unknown characteristic",
-                    characteristicId
+                    'Unexpected characteristic value notification for device ' +
+                    deviceId + ' and characteristic ' + characteristicId
                 );
-                console.log('Know characteristics', Object.keys(native.devicesBeingNotified));
                 return;
             }
-            let strData = atob(d64);
-            let dataView = new DataView(str2ab(strData));
+            console.log("<-- char val notification", characteristicId, d64);
             chars.forEach(function (char) {
+                let dataView = str64todv(d64);
                 char.value = dataView;
                 char.dispatchEvent(new BluetoothEvent("characteristicvaluechanged", char));
             });
@@ -802,4 +837,11 @@
     navigator.bluetooth = bluetooth;
     window.BluetoothUUID = BluetoothUUID;
     nslog("navigator.bluetooth: " + navigator.bluetooth);
+
+    // Patches
+    // Patch window.open so it doesn't attempt to open in a separate window or tab ever.
+    function open(location) {
+        window.location = location;
+    }
+    window.open = open;
 }());
